@@ -1,0 +1,10 @@
+node_modules/
+checks/
+.env
+.env.*
+*.key
+*.pem
+keys*.json
+.caelix/settings.local.json
+.DS_Store
+*.log

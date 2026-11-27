@@ -1,0 +1,12 @@
+{
+  "name": "caelix-cli",
+  "version": "1.0.0",
+  "description": "CAELIX CLI - a coding agent in your terminal",
+  "bin": { "caelix": "bin/caelix.js" },
+  "files": ["bin", "src"],
+  "scripts": { "selfcheck": "node test/selfcheck.js" },
+  "engines": { "node": ">=22" },
+  "license": "MIT",
+  "repository": { "type": "git", "url": "git+https://github.com/mailsitnc-ai/caelix-cli.git" },
+  "homepage": "https://github.com/mailsitnc-ai/caelix-cli"
+}

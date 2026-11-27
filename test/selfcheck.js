@@ -114,6 +114,8 @@ async function main() {
   const md = createRenderer();
   pass('Markdown is drawn for the terminal', [md.line('# Title'), md.line('- item **bold**'), md.line('```js'), md.line('**not bold**'), md.line('```')].join('\n') === 'Title\n• item bold\n┌─ js\n│ **not bold**\n└─');
 
+  await teamAndTesting();
+
   if (process.platform !== 'win32') await interactive();
   else process.stdout.write('skip interactive checks on Windows\n');
 
@@ -126,8 +128,50 @@ async function main() {
   process.exit(report.passed === report.total && !errors.length ? 0 : 1);
 }
 
-async function pty(args, steps, cwd = WORK) {
-  const r = await run([], { cmd: 'python3', pre: [path.join(__dirname, 'drive_terminal.py')], input: JSON.stringify({ argv: [process.execPath, BIN, ...args], cwd, steps }), env: { ...ENV, TERM: 'xterm-256color' } });
+// team mode and model testing, against a fake provider on this computer
+async function teamAndTesting() {
+  const server = await require('./fake_server').start();
+  const env = { ...ENV, CAELIX_COARENA_API_KEY: 'fake-key-for-selfcheck' };
+  const go = (args, o = {}) => run(args, { env, ...o });
+  await go(['keys', 'base', 'coarena', server.url]);
+  const M = (m) => 'coarena/' + m;
+
+  let r = await go(['test', M('good-model'), M('no-tools-model'), M('broke-model'), '--output-format', 'json']);
+  let rows = {}; try { for (const x of JSON.parse(r.out).results) rows[x.model] = x; } catch (_) {}
+  pass('caelix test reports which models reply and which can use tools', r.code === 1 && rows['good-model'] && rows['good-model'].ok && rows['good-model'].tools === true && rows['no-tools-model'].ok && rows['no-tools-model'].tools === false && !rows['broke-model'].ok && rows['broke-model'].verdict === 'needs credits', r.out + r.err);
+  r = await go(['test', 'coarena', '--match', 'good', '--no-tools']);
+  pass('caelix test <provider> tests its models, and --match narrows them', r.code === 0 && /good-model/.test(r.out) && /1 of 1 work/.test(r.out) && !/broke/.test(r.out), r.out + r.err);
+  r = await go(['test', 'coarena', '--limit', '2']);
+  pass('a long list is capped, and says how many were left out', /of 2 work/.test(r.out) && /4 more not tested/.test(r.out), r.out + r.err);
+  r = await go(['test', 'groq/some-model']);
+  pass('testing a provider without a key says how to add one', r.code === 1 && /caelix keys add groq/.test(r.out), r.out + r.err);
+
+  const dir = tmp('caelix-check-team-');
+  r = await go(['team', 'set', M('coder-model'), M('reviewer-model')]);
+  const shown = await go(['team', 'status']);
+  pass('caelix team saves the coder and reviewer', r.code === 0 && /Team mode on/.test(shown.out) && /coder-model/.test(shown.out) && /reviewer-model/.test(shown.out), r.out + r.err + shown.out);
+  server.seen.length = 0;
+  let a = await json(['-p', '--mode', 'acceptEdits', 'write the file'], { env, cwd: dir });
+  pass('team mode: the coder writes and the reviewer checks it', a.j.result === 'Draft written.' && /APPROVED/.test(a.j.review || '') && server.seen.map((s) => s.model).join(',') === 'coder-model,coder-model,reviewer-model', a.out + a.err + JSON.stringify(server.seen));
+  a = await json(['-p', '--mode', 'acceptEdits', '--reviewer', M('strict-reviewer'), 'write the file'], { env, cwd: tmp('caelix-check-team2-') });
+  pass('team mode: changes asked for by the reviewer are made', a.j.result === 'Fixed after review.' && /CHANGES NEEDED/.test(a.j.review || ''), a.out + a.err);
+  server.seen.length = 0;
+  a = await json(['-p', '--no-team', '--model', M('good-model'), 'hello'], { env, cwd: dir });
+  pass('--no-team skips the saved team', a.j.result === 'ready' && server.seen.every((s) => s.model === 'good-model') && !a.j.review, a.out + a.err);
+  r = await go(['team', 'off']); const off = await go(['team', 'status']);
+  pass('team mode can be turned off', /Team mode off/.test(off.out), off.out);
+  r = await go(['-p', '--team', 'x'], { env: { ...env, CAELIX_HOME: tmp('caelix-check-empty-') } });
+  pass('--team without a reviewer says what to do', r.code === 1 && /needs a reviewer/.test(r.err), r.err);
+
+  if (process.platform !== 'win32') {
+    const t = await pty(['--model', M('good-model')], [{ expect: '● Manual' }, { send: '/team\r' }, { expect: 'one model writes' }, { send: '3' }, { expect: 'Turn team mode off' }, { send: '\x1b' }, { sleep: 0.9 }, { expect: 'Team mode on' }, { expect: '· team' }, { send: '/team off\r' }, { expect: 'Team mode off' }, { send: '/test ' + M('good-model') + '\r' }, { expect: 'tools ✔' }, { expect: '1 of 1 work' }, { send: '/test ' + M('good-model') + ' ' + M('no-tools-model') + '\r' }, { expect: 'Switch to one of the working models?' }, { send: '2' }, { expect: 'Now using coarena / no-tools-model' }, { send: '\x04' }], dir, env);
+    pass('interactive: the /team menu and /test work, and a working model can be switched to', t.ok && t.exit === 0, tail(t));
+  }
+  server.close();
+}
+
+async function pty(args, steps, cwd = WORK, env = ENV) {
+  const r = await run([], { cmd: 'python3', pre: [path.join(__dirname, 'drive_terminal.py')], input: JSON.stringify({ argv: [process.execPath, BIN, ...args], cwd, steps }), env: { ...env, TERM: 'xterm-256color' } });
   try { return JSON.parse(r.out); } catch (_) { errors.push('terminal driver: ' + r.err.slice(0, 500)); return { ok: false, screen: r.err }; }
 }
 const tail = (r) => JSON.stringify(r.failed) + '\n' + r.screen.slice(-700);

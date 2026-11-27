@@ -45,7 +45,7 @@ In a session:
 | `!command` | run a shell command yourself |
 | `# note` | save a note about this project |
 
-Commands: `/help /model /keys /mode /plan /chat /code /clear /resume /rename /compact /reset /context /diff /rewind /init /memory /remember /effort /team /mcp /hooks /export /copy /doctor /update /exit`.
+Commands: `/help /model /test /team /keys /mode /plan /chat /code /clear /resume /rename /compact /reset /context /diff /rewind /init /memory /remember /effort /mcp /hooks /export /copy /doctor /update /exit`.
 
 ### One-shot mode
 
@@ -57,13 +57,37 @@ caelix -p --mode acceptEdits --allowed-tools "Bash(npm test)" "fix the failing t
 
 `--output-format json` or `stream-json` gives machine-readable output.
 
+## Team mode
+
+One model writes the code and a second one reviews the files it edited. If the reviewer asks for changes, the coder makes them (one round).
+
+```bash
+caelix team                       # menu: choose coder and reviewer, turn on or off
+caelix team set kilo/kilo-auto/free openrouter/some/model
+caelix team off
+```
+
+In a session use `/team`. The choice is remembered. For one run, use `--team`, `--no-team`, `--coder provider/model` or `--reviewer provider/model`. The reviewer only runs when files were written or edited with the file tools, not when a shell command changed them.
+
+## Checking and testing models
+
+```bash
+caelix models kilo                       # list what a provider offers
+caelix test kilo                         # send each a real message, and check it can use tools
+caelix test openrouter --free --match qwen
+caelix test groq/some-model openrouter/other/model
+caelix test                              # your current and team models
+```
+
+A provider is tested 25 models at a time; use `--limit n` or `--all` for more, and `--no-tools` to skip the tool check. With no key for a provider, only its free models are tested. Each test is a real request, so it counts against your limits. In a session, `/test kilo` does the same and offers to switch to a model that works.
+
 ## What it can do
 
 - **Tools:** read, write, edit, search files, shell (with background tasks), web search and fetch, task list, sub-agents, plan mode, documents (md, txt, html, pdf).
 - **Permissions:** five modes plus allow and deny rules. Destructive-looking commands are held back.
 - **Seeing without a vision model:** it can open a page it built in a headless Chrome, Edge or Brave, collect console errors and layout problems, and read the screenshot with on-device OCR.
 - **Staying on track:** it keeps going past a failed step, says why a turn ended, and cuts off replies that loop or invent tool output.
-- **Team mode:** one model writes the code and a second reviews it.
+- **Team mode:** a coder and a reviewer (see above).
 - **Checkpoints:** `/rewind` restores files and conversation.
 - **Extensible:** MCP servers, hooks, skills (`.caelix/skills/<name>/SKILL.md`), your own commands (`.caelix/commands/<name>.md`, `$ARGUMENTS` is replaced), and project instructions in `CAELIX.md` or `AGENTS.md`.
 

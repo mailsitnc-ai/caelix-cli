@@ -1,6 +1,6 @@
 {
   "name": "caelix-cli",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "CAELIX CLI - a coding agent in your terminal",
   "bin": { "caelix": "bin/caelix.js" },
   "files": ["bin", "src"],

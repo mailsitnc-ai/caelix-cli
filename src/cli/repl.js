@@ -11,6 +11,8 @@ const { createRenderer } = require('./markdown');
 const { expandMentions, VERSION, agent, providers, config } = require('./host');
 const { MODE_LABEL } = require('../engine/permissions');
 const { keysCommand, doctor, update } = require('./tasks');
+const models = require('./models');
+const teams = require('./team');
 
 const CYCLE = ['default', 'acceptEdits', 'plan', 'auto'];
 const ago = (t) => { const m = Math.round((Date.now() - t) / 60000); return m < 1 ? 'just now' : m < 60 ? m + 'm ago' : m < 1440 ? Math.round(m / 60) + 'h ago' : Math.round(m / 1440) + 'd ago'; };
@@ -18,7 +20,9 @@ const textOf = (content) => agent.textOf(content).split('\n\n[CAELIX note')[0];
 
 async function startRepl(host, opts) {
   let session; let abort = null; let quit = false; let shellNotes = [];
-  const fresh = (extra = {}) => host.newSession({ provider: opts.provider, model: opts.model, cwd: process.cwd(), mode: opts.mode, kind: opts.chat ? 'chat' : 'code', effort: opts.effort, ...extra });
+  const startTeam = teams.fromFlags(host, opts);
+  let team = startTeam;
+  const fresh = (extra = {}) => { const s = host.newSession({ provider: opts.provider, model: opts.model, cwd: process.cwd(), mode: opts.mode, kind: opts.chat ? 'chat' : 'code', effort: opts.effort, ...extra }); teams.apply(s.rt, team); return s; };
   const rt = () => session.rt;
   const view = createView({ cwd: () => rt().st.cwd });
   const say = (s = '') => view.out(s);
@@ -91,20 +95,7 @@ async function startRepl(host, opts) {
   }
 
   // ---------- models ----------
-  async function pickModel(heading = 'Choose a provider') {
-    const list = providers.PROVIDERS.filter((p) => !p.hidden);
-    const ready = (p) => p.virtual || p.anonymous || host.keys.has(p.id);
-    const sorted = [...list].sort((a, b) => ready(b) - ready(a));
-    const pi = await input.select(heading, sorted.map((p) => ({ label: p.name, hint: ready(p) ? (host.keys.has(p.id) ? 'key saved' : 'ready') : 'needs a key: /keys' })), { filter: true });
-    if (pi < 0) return null;
-    const p = sorted[pi]; let models;
-    dim('loading models…');
-    try { models = await host.listModels(p.id); } catch (e) { say(c.red('  ' + e.message)); return null; }
-    if (!models.length) { dim('That provider lists no models.'); return null; }
-    models = [...models].sort((a, b) => !!b.free - !!a.free);
-    const mi = await input.select(`${p.name}: choose a model (type to filter)`, models.map((m) => ({ label: m.id, hint: [m.free ? 'free' : '', m.desc || ''].filter(Boolean).join(' · ') })), { filter: true });
-    return mi < 0 ? null : { provider: p.id, model: models[mi].id };
-  }
+  const pickModel = (heading) => models.pickModel(host, heading, say);
   function setModel(sel) { rt().provider = sel.provider; rt().model = sel.model; host.saveState({ provider: sel.provider, model: sel.model }); dim('Now using ' + modelName()); }
   function setMode(mode) { rt().st.mode = mode; dim('Mode: ' + MODE_LABEL[mode]); }
 
@@ -165,11 +156,25 @@ async function startRepl(host, opts) {
     memory: ['show loaded instructions and memory', () => say(clean(config.loadMemory(host.dir, rt().st.cwd) || '(none yet: add CAELIX.md or AGENTS.md to the project, or type # followed by a note)'))],
     remember: ['save a note for this project', (arg) => { if (!arg) return dim('Usage: /remember <note>'); dim('Saved to ' + config.addNote(host.dir, rt().st.cwd, arg)); }],
     effort: ['low, medium or high', (arg) => { if (['low', 'medium', 'high'].includes(arg)) rt().effort = arg; dim('Effort: ' + rt().effort); }],
-    team: ['a coder model plus a reviewer model (/team off)', async (arg) => {
-      if (arg === 'off') { rt().team = false; return dim('Team mode off.'); }
-      const coder = await pickModel('Team: provider for the CODER'); if (!coder) return;
-      const reviewer = await pickModel('Team: provider for the REVIEWER'); if (!reviewer) return;
-      Object.assign(rt(), { team: true, coder, reviewer }); dim(`Team on. Coder ${coder.provider}/${coder.model}, reviewer ${reviewer.provider}/${reviewer.model}`);
+    team: ['one model writes, another reviews (/team off)', async (arg) => {
+      try { team = await teams.command(host, arg ? arg.split(/\s+/) : [], { say, interactive: true }); teams.apply(rt(), team); } catch (e) { say(c.red('  ' + e.message)); }
+    }],
+    test: ['check that models answer and can use tools (/test kilo)', async (arg) => {
+      const words = arg ? arg.split(/\s+/) : [];
+      const stop = new AbortController(); const off = input.listen((_s, key) => { if (key.name === 'escape' || (key.ctrl && key.name === 'c')) stop.abort(); });
+      let results = []; let skipped = 0;
+      try {
+        const t = await models.testTargets(host, words, { current: { provider: rt().provider, model: rt().model } }); skipped = t.skipped;
+        if (!t.targets.length) return dim('Automatic routing is selected, so say what to test: /test kilo or /test provider/model');
+        dim(`testing ${t.targets.length} model(s) · esc to stop`);
+        results = await models.runTests(host, t.targets, { say, signal: stop.signal });
+        dim(models.summary(results, skipped));
+      } catch (e) { return say(c.red('  ' + e.message)); } finally { off(); }
+      const good = results.filter((x) => x.ok).sort((a, b) => (b.tools === true) - (a.tools === true) || a.ms - b.ms);
+      if (good.length > 1) {
+        const n = await input.select('Switch to one of the working models?', [...good.map((x) => ({ label: models.specName(x), hint: `${(x.ms / 1000).toFixed(1)}s${x.tools === true ? ' · tools' : ''}` })), { label: 'Keep the current model' }]);
+        if (n >= 0 && n < good.length) setModel({ provider: good[n].provider, model: good[n].model });
+      }
     }],
     mcp: ['list, add or remove MCP servers', async (arg) => {
       const [verb, name, ...cmd] = arg.split(' ');

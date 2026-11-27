@@ -339,6 +339,7 @@ async function runTurn(rt, env, userText, images) {
   try {
     const tools = toolDefs(rt.mcp && rt.mcp.defs, { kind: rt.kind });
     const reply = await loop(rt, env, { messages: rt.messages, tools, depth: 0 });
+    if (rt.kind === 'code' && rt.team && rt.reviewer && rt.reviewer.model && !rt.turnSnap.size) env.emit({ type: 'info', text: 'Team: no files were edited, so there is nothing for the reviewer to check.' });
     if (rt.kind === 'code' && rt.team && rt.reviewer && rt.reviewer.model && rt.turnSnap.size) {
       const verdict = await reviewPass(rt, env, userText, reply);
       if (verdict && verdict.changes && !env.signal.aborted) {

@@ -14,6 +14,8 @@ ${c.sky('Usage')}
 ${c.sky('Commands')}
   caelix keys [add|remove|base] <provider>
   caelix models [provider]
+  caelix test [provider | provider/model ...]   check that models answer and use tools
+  caelix team [set <coder> <reviewer> | on | off | status | test]
   caelix sessions
   caelix doctor
   caelix update
@@ -29,6 +31,9 @@ ${c.sky('Options')}
   --output-format <format>     text, json or stream-json (with -p)
   --chat                       chat without project tools
   --effort <low|medium|high>
+  --team | --no-team           use (or skip) the saved team
+  --coder <provider/model>     team: who writes    --reviewer <provider/model>
+  (with test) --all  --free  --limit <n>  --match <text>  --no-tools
   --verbose                    show actions in one-shot mode
   --dangerously-skip-permissions
   -v, --version    -h, --help
@@ -56,6 +61,15 @@ function parseArgs(argv) {
     else if (a === '--output-format') { o.format = value(); if (!['text', 'json', 'stream-json'].includes(o.format)) throw new Error('Unknown output format ' + o.format); }
     else if (a === '--effort') o.effort = value();
     else if (a === '--chat') o.chat = true;
+    else if (a === '--team') o.team = true;
+    else if (a === '--no-team') o.team = false;
+    else if (a === '--coder') o.coder = value();
+    else if (a === '--reviewer') o.reviewer = value();
+    else if (a === '--all') o.all = true;
+    else if (a === '--free') o.free = true;
+    else if (a === '--no-tools') o.noTools = true;
+    else if (a === '--match') o.match = value();
+    else if (a === '--limit') { o.limit = Number(value()); if (!(o.limit > 0)) throw new Error('--limit needs a positive number'); }
     else if (a === '--verbose') o.verbose = true;
     else if (a === '-v' || a === '--version') o.version = true;
     else if (a === '-h' || a === '--help') o.help = true;
@@ -80,18 +94,20 @@ async function printMode(host, o) {
   const rt = session.rt;
   if (o.provider) { rt.provider = o.provider; rt.model = o.model; } else if (o.model) rt.model = o.model;
   if (o.mode) rt.st.mode = o.mode;
+  const teams = require('./team');
+  if (!(o.continue || o.resume) || o.team !== undefined || o.coder || o.reviewer) teams.apply(rt, teams.fromFlags(host, o));
 
   const abort = new AbortController(); process.once('SIGINT', () => abort.abort());
   const view = o.verbose ? require('./render').createView({ cwd: () => rt.st.cwd, spinner: false, write: (s) => process.stderr.write(s) }) : null;
-  let text = ''; let last = ''; let failed = ''; let stop = ''; let actions = 0; const denied = [];
+  let text = ''; let last = ''; let review = ''; let textId = ''; let failed = ''; let stop = ''; let actions = 0; const denied = []; const warnings = [];
   const emit = (e) => {
     if (o.format === 'stream-json') process.stdout.write(JSON.stringify(e) + '\n');
     if (view && e.type !== 'error') view.event(e);
-    if (e.type === 'text_start') text = ''; else if (e.type === 'text') text += e.delta; else if (e.type === 'text_replace') text = e.text;
-    else if (e.type === 'text_end') { if (text.trim()) last = text.trim(); }
+    if (e.type === 'text_start') { text = ''; textId = e.id; } else if (e.type === 'text') text += e.delta; else if (e.type === 'text_replace') text = e.text;
+    else if (e.type === 'text_end') { if (text.trim()) { if (textId.startsWith('rv')) review = text.trim(); else last = text.trim(); } }
     else if (e.type === 'tool_start') actions++;
     else if (e.type === 'tool_result' && /denied|Permission/.test(e.output) && e.error) denied.push(e.name);
-    else if (e.type === 'error') failed = e.message; else if (e.type === 'stop') stop = e.reason;
+    else if (e.type === 'error') { if (e.message.startsWith('Reviewer failed')) warnings.push(e.message); else failed = e.message; } else if (e.type === 'stop') stop = e.reason;
   };
   const ask = async (req) => {
     if (req.kind === 'permission') return { decision: 'deny', comment: 'nobody can approve this in one-shot mode. It needs --allowed-tools or --mode.' };
@@ -105,14 +121,27 @@ async function printMode(host, o) {
   host.save(session);
 
   const bad = !!failed || stop === 'error' || stop === 'stopped';
-  if (o.format === 'json') process.stdout.write(JSON.stringify({ result: last, is_error: bad, error: failed || undefined, stop_reason: stop, session_id: session.meta.id, provider: rt.provider, model: rt.model, actions, denied, usage: rt.usage }) + '\n');
+  if (o.format === 'json') process.stdout.write(JSON.stringify({ result: last, review: review || undefined, warnings: warnings.length ? warnings : undefined, is_error: bad, error: failed || undefined, stop_reason: stop, session_id: session.meta.id, provider: rt.provider, model: rt.model, actions, denied, usage: rt.usage }) + '\n');
   else if (o.format === 'text') {
     if (last) process.stdout.write(clean(last) + '\n');
+    if (review) process.stdout.write('\n' + clean(review) + '\n');
+    for (const w of warnings) process.stderr.write(c.amber(clean(w)) + '\n');
     if (failed) process.stderr.write(c.red('✖ ' + clean(failed)) + '\n');
     if (denied.length) process.stderr.write(c.amber(`Not allowed here: ${[...new Set(denied)].join(', ')}. Use --allowed-tools or --mode.`) + '\n');
     if (stop && !['finished', 'error'].includes(stop)) process.stderr.write(c.amber('Stopped early: ' + stop) + '\n');
   }
   return bad ? 1 : 0;
+}
+
+async function testCommand(host, words, o) {
+  const models = require('./models');
+  const json = o.format !== 'text';
+  const { targets, skipped } = await models.testTargets(host, words, { limit: o.limit, all: o.all, free: o.free, match: o.match, current: o.model ? { provider: o.provider || host.defaultModel().provider, model: o.model } : undefined });
+  if (!targets.length) throw new Error('Nothing to test. Name a provider or a model, for example: caelix test kilo');
+  if (!json) process.stdout.write(c.dim(`  testing ${targets.length} model(s)…`) + '\n');
+  const results = await models.runTests(host, targets, { tools: !o.noTools, say: json ? () => {} : undefined });
+  if (json) process.stdout.write(JSON.stringify({ results, skipped }) + '\n'); else process.stdout.write(c.dim('  ' + models.summary(results, skipped)) + '\n');
+  return results.every((r) => r.ok) ? 0 : 1;
 }
 
 async function main(argv) {
@@ -126,6 +155,8 @@ async function main(argv) {
     if (!o.print) {
       const tasks = require('./tasks');
       if (cmd === 'keys') { await tasks.keysCommand(host, rest); require('./input').stop(); return 0; }
+      if (cmd === 'test' && rest.every((w) => !/\s/.test(w))) return await testCommand(host, rest, o);
+      if (cmd === 'team' && rest.every((w) => !/\s/.test(w))) { await require('./team').command(host, rest); require('./input').stop(); return 0; }
       if (cmd === 'models' && rest.length <= 1) { await tasks.modelsCommand(host, rest); return 0; }
       if (cmd === 'doctor' && !rest.length) { await tasks.doctor(host); return 0; }
       if (cmd === 'sessions' && !rest.length) { for (const s of host.sessions().slice(0, 50)) process.stdout.write(`${s.id}  ${new Date(s.updated).toISOString().slice(0, 16).replace('T', ' ')}  ${clean(s.title)}  ${c.dim(s.cwd)}\n`); return 0; }
